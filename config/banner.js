@@ -2,7 +2,7 @@ import figlet from "figlet";
 import { colors } from "./colors.js";
 
 export function getBanner() {
-  const banner = figlet.textSync("LayerEdge BOT", {
+  const banner = figlet.textSync("Ryddd29", {
     font: "ANSI Shadow",
     horizontalLayout: "default",
     verticalLayout: "default",
@@ -15,10 +15,16 @@ export function getBanner() {
     `${colors.bannerBorder}===============================================${colors.reset}`
   );
   output.push(
-    `${colors.bannerLinks}GitHub  : https://github.com/Galkurta${colors.reset}`
+    `${colors.bannerLinks}GitHub    : https://github.com/ryzwan29${colors.reset}`
   );
   output.push(
-    `${colors.bannerLinks}Telegram: https://t.me/galkurtarchive${colors.reset}`
+    `${colors.bannerLinks}Telegram  : https://t.me/ryddd29${colors.reset}`
+  );
+  output.push(
+    `${colors.bannerLinks}X         : https://x.com/faridchan13${colors.reset}`
+  );
+  output.push(
+    `${colors.bannerLinks}Instagram : https://www.instagram.com/ryzwannn13${colors.reset}`
   );
   output.push(
     `${colors.bannerBorder}===============================================\n${colors.reset}`
