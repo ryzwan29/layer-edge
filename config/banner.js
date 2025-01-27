@@ -24,7 +24,7 @@ export function getBanner() {
     `${colors.bannerLinks}X         : https://x.com/faridchan13${colors.reset}`
   );
   output.push(
-    `${colors.bannerLinks}Instagram : https://www.instagram.com/ryzwannn13${colors.reset}`
+    `${colors.bannerLinks}Instagram : https://www.instagram.com/0xryddd29${colors.reset}`
   );
   output.push(
     `${colors.bannerBorder}===============================================\n${colors.reset}`
