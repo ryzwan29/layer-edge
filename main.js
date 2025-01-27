@@ -6,7 +6,7 @@ import { colors } from "./config/colors.js";
 import { Wallet } from "ethers";
 
 const CONFIG = {
-  PING_INTERVAL: 0.5,
+  PING_INTERVAL: 0.3,
   get PING_INTERVAL_MS() {
     return this.PING_INTERVAL * 60 * 1000;
   },
@@ -71,26 +71,26 @@ class WalletDashboard {
     }
   }
 
-  getApi() { 
-    return axios.create({ 
-      baseURL: "https://referralapi.layeredge.io/api", 
-      headers: { 
-        Accept: "*/*", 
-        "Accept-Encoding": "gzip, deflate, br", 
-        "Accept-Language": "en-US,en;q=0.9", 
-        "Content-Type": "application/json", 
-        Origin: "https://referralapi.layeredge.io", 
-        Referer: "https://referralapi.layeredge.io/", 
-        "User-Agent": 
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", 
-      }, 
-      timeout: 30000, 
-      maxRetries: 20, 
-      retryDelay: 2000, 
-      retryCondition: (error) => { 
-        return axios.isNetworkError(error) || error.code === "ETIMEDOUT"; 
-      }, 
-    }); 
+  getApi() {
+    return axios.create({
+      baseURL: "https://referralapi.layeredge.io/api",
+      headers: {
+        Accept: "*/*",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/json",
+        Origin: "https://referralapi.layeredge.io",
+        Referer: "https://referralapi.layeredge.io/",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      },
+      timeout: 30000,
+      maxRetries: 20,
+      retryDelay: 2000,
+      retryCondition: (error) => {
+        return axios.isNetworkError(error) || error.code === "ETIMEDOUT";
+      },
+    });
   }
 
   async signAndStart(wallet, privateKey) {
@@ -245,15 +245,15 @@ class WalletDashboard {
         clearTimeout(this.renderTimeout);
       }
       this.renderTimeout = setTimeout(() => {
-        this.actualRender();
+        this.referralapi();
       }, this.minRenderInterval);
       return;
     }
 
-    this.actualRender();
+    this.referralapi();
   }
 
-  actualRender() {
+  referralapi() {
     this.lastRender = Date.now();
     let output = [];
 
