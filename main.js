@@ -1,390 +1,458 @@
-import fs from "fs/promises";
+import fs from 'fs/promises';
 import axios from "axios";
-import readline from "readline";
-import { getBanner } from "./config/banner.js";
-import { colors } from "./config/colors.js";
+import chalk from "chalk";
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Wallet } from "ethers";
+import banner from './utils/banner.js';
 
-const CONFIG = {
-  PING_INTERVAL: 0.3,
-  get PING_INTERVAL_MS() {
-    return this.PING_INTERVAL * 60 * 1000;
-  },
+
+const logger = {
+    verbose: true, 
+    
+    _formatTimestamp() {
+        return chalk.gray(`[${new Date().toLocaleTimeString()}]`);
+    },
+
+    _getLevelStyle(level) {
+        const styles = {
+            info: chalk.blueBright.bold,
+            warn: chalk.yellowBright.bold,
+            error: chalk.redBright.bold,
+            success: chalk.greenBright.bold,
+            debug: chalk.magentaBright.bold,
+            verbose: chalk.cyan.bold
+        };
+        return styles[level] || chalk.white;
+    },
+
+    _formatError(error) {
+        if (!error) return '';
+        
+        let errorDetails = '';
+        if (axios.isAxiosError(error)) {
+            errorDetails = `
+            Status: ${error.response?.status || 'N/A'}
+            Status Text: ${error.response?.statusText || 'N/A'}
+            URL: ${error.config?.url || 'N/A'}
+            Method: ${error.config?.method?.toUpperCase() || 'N/A'}
+            Response Data: ${JSON.stringify(error.response?.data || {}, null, 2)}
+            Headers: ${JSON.stringify(error.config?.headers || {}, null, 2)}`;
+        }
+        return `${error.message}${errorDetails}`;
+    },
+
+    log(level, message, value = '', error = null) {
+        const timestamp = this._formatTimestamp();
+        const levelStyle = this._getLevelStyle(level);
+        const levelTag = levelStyle(`[${level.toUpperCase()}]`);
+        const header = chalk.cyan('◆ LayerEdge Auto Bot');
+
+        let formattedMessage = `${header} ${timestamp} ${levelTag} ${message}`;
+        
+        if (value) {
+            const valueStyle = level === 'error' ? chalk.red : 
+                             level === 'warn' ? chalk.yellow : 
+                             chalk.green;
+            formattedMessage += ` ${valueStyle(value)}`;
+        }
+
+        if (error && this.verbose) {
+            formattedMessage += `\n${chalk.red(this._formatError(error))}`;
+        }
+
+        console.log(formattedMessage);
+    },
+
+    info: (message, value = '') => logger.log('info', message, value),
+    warn: (message, value = '') => logger.log('warn', message, value),
+    error: (message, value = '', error = null) => logger.log('error', message, value, error),
+    success: (message, value = '') => logger.log('success', message, value),
+    debug: (message, value = '') => logger.log('debug', message, value),
+    verbose: (message, value = '') => logger.verbose && logger.log('verbose', message, value),
+
+    progress(wallet, step, status) {
+        const progressStyle = status === 'success' 
+            ? chalk.green('✔') 
+            : status === 'failed' 
+            ? chalk.red('✘') 
+            : chalk.yellow('➤');
+        
+        console.log(
+            chalk.cyan('◆ LayerEdge Auto Bot'),
+            chalk.gray(`[${new Date().toLocaleTimeString()}]`),
+            chalk.blueBright(`[PROGRESS]`),
+            `${progressStyle} ${wallet} - ${step}`
+        );
+    }
 };
 
-readline.emitKeypressEvents(process.stdin);
-process.stdin.setRawMode(true);
+// Enhanced Request Handler
+class RequestHandler {
+    static async makeRequest(config, retries = 30, backoffMs = 2000) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                logger.verbose(`Attempting request (${i + 1}/${retries})`, `URL: ${config.url}`);
+                const response = await axios(config);
+                logger.verbose(`Request successful`, `Status: ${response.status}`);
+                return response;
+            } catch (error) {
+                const isLastRetry = i === retries - 1;
+                const status = error.response?.status;
+                
+                // Special handling for 500 errors
+                if (status === 500) {
+                    logger.error(`Server Error (500)`, `Attempt ${i + 1}/${retries}`, error);
+                    if (isLastRetry) break;
+                    
+                    // Exponential backoff for 500 errors
+                    const waitTime = backoffMs * Math.pow(1.5, i);
+                    logger.warn(`Waiting ${waitTime/1000}s before retry...`);
+                    await delay(waitTime/1000);
+                    continue;
+                }
 
-class WalletDashboard {
-  constructor() {
-    this.wallets = [];
-    this.selectedIndex = 0;
-    this.currentPage = 0;
-    this.walletsPerPage = 5;
-    this.isRunning = true;
-    this.pingIntervals = new Map();
-    this.walletStats = new Map();
-    this.privateKeys = new Map();
-    this.renderTimeout = null;
-    this.lastRender = 0;
-    this.minRenderInterval = 100;
-  }
+                if (isLastRetry) {
+                    logger.error(`Max retries reached`, '', error);
+                    return null;
+                }
 
-  async initialize() {
-    try {
-      const data = await fs.readFile("data.txt", "utf8");
-      const privateKeys = data.split("\n").filter((line) => line.trim() !== "");
-
-      this.wallets = [];
-      this.privateKeys = new Map();
-
-      for (let privateKey of privateKeys) {
-        try {
-          const wallet = new Wallet(privateKey);
-          const address = wallet.address;
-          this.wallets.push(address);
-          this.privateKeys.set(address, privateKey);
-
-          this.walletStats.set(address, {
-            status: "Starting",
-            lastPing: "-",
-            points: 0,
-            error: null,
-          });
-
-          this.startPing(address);
-        } catch (error) {
-          console.error(
-            `${colors.error}Invalid private key: ${privateKey} - ${error.message}${colors.reset}`
-          );
+                logger.warn(`Request failed`, `Attempt ${i + 1}/${retries}`, error);
+                await delay(2);
+            }
         }
-      }
-
-      if (this.wallets.length === 0) {
-        throw new Error("No valid private keys found in data.txt");
-      }
-    } catch (error) {
-      console.error(
-        `${colors.error}Error reading data.txt: ${error}${colors.reset}`
-      );
-      process.exit(1);
+        return null;
     }
-  }
-
-  getApi() {
-    return axios.create({
-      baseURL: "https://referralapi.layeredge.io/api",
-      headers: {
-        Accept: "*/*",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Content-Type": "application/json",
-        Origin: "https://referralapi.layeredge.io",
-        Referer: "https://referralapi.layeredge.io/",
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      },
-      timeout: 30000,
-      maxRetries: 20,
-      retryDelay: 2000,
-      retryCondition: (error) => {
-        return axios.isNetworkError(error) || error.code === "ETIMEDOUT";
-      },
-    });
-  }
-
-  async signAndStart(wallet, privateKey) {
-    try {
-      const walletInstance = new Wallet(privateKey);
-      const timestamp = Date.now();
-      const message = `Node activation request for ${wallet} at ${timestamp}`;
-      const sign = await walletInstance.signMessage(message);
-
-      const response = await this.getApi().post(
-        `/light-node/node-action/${wallet}/start`,
-        {
-          sign: sign,
-          timestamp: timestamp,
-        }
-      );
-
-      return response.data?.message === "node action executed successfully";
-    } catch (error) {
-      throw new Error(`Node activation failed: ${error.message}`);
-    }
-  }
-
-  async checkNodeStatus(wallet, retries = 20) {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const response = await this.getApi().get(
-          `/light-node/node-status/${wallet}`
-        );
-        return response.data?.data?.startTimestamp !== null;
-      } catch (error) {
-        if (i === retries - 1) {
-          if (error.code === "ETIMEDOUT" || error.code === "ECONNABORTED") {
-            throw new Error(
-              "Connection timeout, please check your internet connection"
-            );
-          }
-          if (error.response?.status === 404) {
-            throw new Error("Node not found");
-          }
-          throw new Error(`Check status failed: ${error.message}`);
-        }
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        continue;
-      }
-    }
-  }
-
-  async checkPoints(wallet) {
-    try {
-      const response = await this.getApi().get(
-        `/referral/wallet-details/${wallet}`
-      );
-      return response.data?.data?.nodePoints || 0;
-    } catch (error) {
-      throw new Error(`Check points failed: ${error.message}`);
-    }
-  }
-
-  async updatePoints(wallet) {
-    try {
-      const timestamp = Date.now();
-
-      const isRunning = await this.checkNodeStatus(wallet);
-      if (!isRunning) {
-        throw new Error("Node not running");
-      }
-
-      const points = await this.checkPoints(wallet);
-      return { nodePoints: points };
-    } catch (error) {
-      if (error.response) {
-        switch (error.response.status) {
-          case 500:
-            throw new Error("Internal Server Error");
-          case 504:
-            throw new Error("Gateway Timeout");
-          case 403:
-            throw new Error("Node not activated");
-          default:
-            throw new Error(`Update points failed: ${error.message}`);
-        }
-      }
-      throw error;
-    }
-  }
-
-  async startPing(wallet) {
-    if (this.pingIntervals.has(wallet)) {
-      return;
-    }
-
-    const stats = this.walletStats.get(wallet);
-
-    try {
-      const privateKey = this.privateKeys.get(wallet);
-      if (!privateKey) {
-        throw new Error("Private key not found for wallet");
-      }
-
-      stats.status = "Checking Status";
-      this.renderDashboard();
-
-      const isRunning = await this.checkNodeStatus(wallet);
-      if (!isRunning) {
-        stats.status = "Activating";
-        this.renderDashboard();
-
-        await this.signAndStart(wallet, privateKey);
-        stats.status = "Activated";
-        this.renderDashboard();
-
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-      }
-
-      const result = await this.updatePoints(wallet);
-      stats.lastPing = new Date().toLocaleTimeString();
-      stats.points = result.nodePoints || stats.points;
-      stats.status = "Active";
-      stats.error = null;
-    } catch (error) {
-      stats.status = "Error";
-      stats.error = error.message;
-      console.error(`Error starting node for ${wallet}:`, error.message);
-      return;
-    }
-
-    const pingInterval = setInterval(async () => {
-      try {
-        const result = await this.updatePoints(wallet);
-        const stats = this.walletStats.get(wallet);
-        stats.lastPing = new Date().toLocaleTimeString();
-        stats.points = result.nodePoints || stats.points;
-        stats.status = "Active";
-        stats.error = null;
-      } catch (error) {
-        const stats = this.walletStats.get(wallet);
-        stats.status = "Error";
-        stats.error = error.message;
-      }
-      this.renderDashboard();
-    }, CONFIG.PING_INTERVAL_MS);
-
-    this.pingIntervals.set(wallet, pingInterval);
-    this.renderDashboard();
-  }
-
-  renderDashboard() {
-    const now = Date.now();
-    if (now - this.lastRender < this.minRenderInterval) {
-      if (this.renderTimeout) {
-        clearTimeout(this.renderTimeout);
-      }
-      this.renderTimeout = setTimeout(() => {
-        this.referralapi();
-      }, this.minRenderInterval);
-      return;
-    }
-
-    this.referralapi();
-  }
-
-  referralapi() {
-    this.lastRender = Date.now();
-    let output = [];
-
-    output.push("\x1b[2J\x1b[H");
-
-    output.push(getBanner());
-
-    const startIndex = this.currentPage * this.walletsPerPage;
-    const endIndex = Math.min(
-      startIndex + this.walletsPerPage,
-      this.wallets.length
-    );
-    const totalPages = Math.ceil(this.wallets.length / this.walletsPerPage);
-
-    for (let i = startIndex; i < endIndex; i++) {
-      const wallet = this.wallets[i];
-      const stats = this.walletStats.get(wallet);
-      const prefix =
-        i === this.selectedIndex ? `${colors.cyan}→${colors.reset} ` : "  ";
-      const shortWallet = `${wallet.substr(0, 6)}...${wallet.substr(-4)}`;
-
-      output.push(
-        `${prefix}Wallet: ${colors.accountName}${shortWallet}${colors.reset}`
-      );
-      output.push(
-        `   Status: ${this.getStatusColor(stats.status)}${stats.status}${
-          colors.reset
-        }`
-      );
-      output.push(`   Points: ${colors.info}${stats.points}${colors.reset}`);
-      output.push(
-        `   Last Ping: ${colors.info}${stats.lastPing}${colors.reset}`
-      );
-      if (stats.error) {
-        output.push(`   Error: ${colors.error}${stats.error}${colors.reset}`);
-      }
-      output.push("");
-    }
-
-    output.push(
-      `\n${colors.menuBorder}Page ${this.currentPage + 1}/${totalPages}${
-        colors.reset
-      }`
-    );
-    output.push(`\n${colors.menuTitle}Configuration:${colors.reset}`);
-    output.push(
-      `${colors.menuOption}Ping Interval: ${CONFIG.PING_INTERVAL} minute(s)${colors.reset}`
-    );
-    output.push(`\n${colors.menuTitle}Controls:${colors.reset}`);
-    output.push(
-      `${colors.menuOption}↑/↓: Navigate | ←/→: Change Page | Ctrl+C: Exit${colors.reset}\n`
-    );
-
-    process.stdout.write(output.join("\n"));
-  }
-
-  getStatusColor(status) {
-    switch (status) {
-      case "Active":
-        return colors.success;
-      case "Error":
-        return colors.error;
-      case "Activated":
-        return colors.taskComplete;
-      case "Activation Failed":
-        return colors.taskFailed;
-      case "Starting":
-        return colors.taskInProgress;
-      case "Checking Status":
-        return colors.taskInProgress;
-      case "Activating":
-        return colors.taskInProgress;
-      default:
-        return colors.reset;
-    }
-  }
-
-  handleKeyPress(str, key) {
-    const startIndex = this.currentPage * this.walletsPerPage;
-    const endIndex = Math.min(
-      startIndex + this.walletsPerPage,
-      this.wallets.length
-    );
-    const totalPages = Math.ceil(this.wallets.length / this.walletsPerPage);
-
-    if (key.name === "up" && this.selectedIndex > startIndex) {
-      this.selectedIndex--;
-      this.renderDashboard();
-    } else if (key.name === "down" && this.selectedIndex < endIndex - 1) {
-      this.selectedIndex++;
-      this.renderDashboard();
-    } else if (key.name === "left" && this.currentPage > 0) {
-      this.currentPage--;
-      this.selectedIndex = this.currentPage * this.walletsPerPage;
-      this.renderDashboard();
-    } else if (key.name === "right" && this.currentPage < totalPages - 1) {
-      this.currentPage++;
-      this.selectedIndex = this.currentPage * this.walletsPerPage;
-      this.renderDashboard();
-    }
-  }
-
-  async start() {
-    process.on("SIGINT", function () {
-      console.log(`\n${colors.info}Shutting down...${colors.reset}`);
-      process.exit();
-    });
-
-    process.on("exit", () => {
-      for (let [wallet, interval] of this.pingIntervals) {
-        clearInterval(interval);
-      }
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    });
-
-    await this.initialize();
-    this.renderDashboard();
-
-    process.stdin.on("keypress", (str, key) => {
-      if (key.ctrl && key.name === "c") {
-        process.emit("SIGINT");
-      } else {
-        this.handleKeyPress(str, key);
-      }
-    });
-  }
 }
 
-const dashboard = new WalletDashboard();
-dashboard.start().catch((error) => {
-  console.error(`${colors.error}Fatal error: ${error}${colors.reset}`);
-  process.exit(1);
-});
+// Helper Functions
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms * 1000));
+}
+
+async function saveToFile(filename, data) {
+    try {
+        await fs.appendFile(filename, `${data}\n`, 'utf-8');
+        logger.info(`Data saved to ${filename}`);
+    } catch (error) {
+        logger.error(`Failed to save data to ${filename}: ${error.message}`);
+    }
+}
+
+async function readFile(pathFile) {
+    try {
+        const datas = await fs.readFile(pathFile, 'utf8');
+        return datas.split('\n')
+            .map(data => data.trim())
+            .filter(data => data.length > 0);
+    } catch (error) {
+        logger.error(`Error reading file: ${error.message}`);
+        return [];
+    }
+}
+
+const newAgent = (proxy = null) => {
+    if (proxy) {
+        if (proxy.startsWith('http://')) {
+            return new HttpsProxyAgent(proxy);
+        } else if (proxy.startsWith('socks4://') || proxy.startsWith('socks5://')) {
+            return new SocksProxyAgent(proxy);
+        } else {
+            logger.warn(`Unsupported proxy type: ${proxy}`);
+            return null;
+        }
+    }
+    return null;
+};
+
+// Enhanced LayerEdge Connection Class
+class LayerEdgeConnection {
+    constructor(proxy = null, privateKey = null, refCode = "knYyWnsE") {
+        this.refCode = refCode;
+        this.proxy = proxy;
+        this.retryCount = 30;
+
+        // Browser-like headers
+        this.headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://layeredge.io',
+            'Referer': 'https://layeredge.io/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'sec-ch-ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"'
+        };
+
+        this.axiosConfig = {
+            ...(this.proxy && { httpsAgent: newAgent(this.proxy) }),
+            timeout: 60000,
+            headers: this.headers,
+            validateStatus: (status) => {
+                return status < 500;
+            }
+        };
+
+        this.wallet = privateKey
+            ? new Wallet(privateKey)
+            : Wallet.createRandom();
+            
+        logger.verbose(`Initialized LayerEdgeConnection`, 
+            `Wallet: ${this.wallet.address}\nProxy: ${this.proxy || 'None'}`);
+    }
+
+    async makeRequest(method, url, config = {}) {
+        const finalConfig = {
+            method,
+            url,
+            ...this.axiosConfig,
+            ...config,
+            headers: {
+                ...this.headers,
+                ...(config.headers || {})
+            }
+        };
+        
+        return await RequestHandler.makeRequest(finalConfig, this.retryCount);
+    }
+
+    async checkInvite() {
+        const inviteData = {
+            invite_code: this.refCode,
+        };
+
+        const response = await this.makeRequest(
+            "post",
+            "https://referralapi.layeredge.io/api/referral/verify-referral-code",
+            { data: inviteData }
+        );
+
+        if (response && response.data && response.data.data.valid === true) {
+            logger.info("Invite Code Valid", response.data);
+            return true;
+        } else {
+            logger.error("Failed to check invite");
+            return false;
+        }
+    }
+
+    async registerWallet() {
+        const registerData = {
+            walletAddress: this.wallet.address,
+        };
+
+        const response = await this.makeRequest(
+            "post",
+            `https://referralapi.layeredge.io/api/referral/register-wallet/${this.refCode}`,
+            { data: registerData }
+        );
+
+        if (response && response.data) {
+            logger.info("Wallet successfully registered", response.data);
+            return true;
+        } else {
+            logger.error("Failed To Register wallets", "error");
+            return false;
+        }
+    }
+
+    async connectNode() {
+        const timestamp = Date.now();
+        const message = `Node activation request for ${this.wallet.address} at ${timestamp}`;
+        const sign = await this.wallet.signMessage(message);
+
+        const dataSign = {
+            sign: sign,
+            timestamp: timestamp,
+        };
+
+        // Add content-type header specifically for POST requests
+        const config = {
+            data: dataSign,
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        };
+
+        const response = await this.makeRequest(
+            "post",
+            `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/start`,
+            config
+        );
+
+        if (response && response.data && response.data.message === "node action executed successfully") {
+            logger.info("Connected Node Successfully", response.data);
+            return true;
+        } else {
+            logger.info("Failed to connect Node");
+            return false;
+        }
+    }
+
+    async stopNode() {
+        const timestamp = Date.now();
+        const message = `Node deactivation request for ${this.wallet.address} at ${timestamp}`;
+        const sign = await this.wallet.signMessage(message);
+
+        const dataSign = {
+            sign: sign,
+            timestamp: timestamp,
+        };
+
+        const response = await this.makeRequest(
+            "post",
+            `https://referralapi.layeredge.io/api/light-node/node-action/${this.wallet.address}/stop`,
+            { data: dataSign }
+        );
+
+        if (response && response.data) {
+            logger.info("Stop and Claim Points Result:", response.data);
+            return true;
+        } else {
+            logger.error("Failed to Stopping Node and claiming points");
+            return false;
+        }
+    }
+
+    async dailyCheckIn() {
+        const timestamp = Date.now();
+        const message = `Daily check-in request for ${this.wallet.address} at ${timestamp}`;
+        const sign = await this.wallet.signMessage(message);
+
+        const dataSign = {
+            sign: sign,
+            timestamp: timestamp,
+            walletAddress: this.wallet.address
+        };
+
+        const response = await this.makeRequest(
+            "post",
+            "https://referralapi.layeredge.io/api/light-node/claim-node-points",
+            { data: dataSign }
+        );
+
+        if (response && response.data) {
+            logger.info("Daily Check in Result:", response.data);
+            return true;
+        } else {
+            logger.error("Failed to perform daily check-in");
+            return false;
+        }
+    }
+
+    async checkNodeStatus() {
+        const response = await this.makeRequest(
+            "get",
+            `https://referralapi.layeredge.io/api/light-node/node-status/${this.wallet.address}`
+        );
+
+        if (response && response.data && response.data.data.startTimestamp !== null) {
+            logger.info("Node Status Running", response.data);
+            return true;
+        } else {
+            logger.error("Node not running trying to start node...");
+            return false;
+        }
+    }
+
+    async checkNodePoints() {
+        const response = await this.makeRequest(
+            "get",
+            `https://referralapi.layeredge.io/api/referral/wallet-details/${this.wallet.address}`
+        );
+
+        if (response && response.data) {
+            logger.info(`${this.wallet.address} Total Points:`, response.data.data?.nodePoints || 0);
+            return true;
+        } else {
+            logger.error("Failed to check Total Points..");
+            return false;
+        }
+    }
+}
+
+// Main Application
+async function readWallets() {
+    try {
+        await fs.access("wallets1.json");
+        const data = await fs.readFile("wallets1.json", "utf-8");
+        return JSON.parse(data);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            logger.info("No wallets found in wallets1.json");
+            return [];
+        }
+        throw err;
+    }
+}
+
+async function run() {
+    console.log(banner);
+    logger.info('Starting Layer Edge Auto Bot', 'Initializing...');
+    
+    try {
+        const proxies = await readFile('proxy.txt');
+        let wallets = await readWallets();
+        
+        if (proxies.length === 0) {
+            logger.warn('No Proxies', 'Running without proxy support');
+        }
+        
+        if (wallets.length === 0) {
+            throw new Error('No wallets configured');
+        }
+
+        logger.info('Configuration loaded', `Wallets: ${wallets.length}, Proxies: ${proxies.length}`);
+
+        while (true) {
+            for (let i = 0; i < wallets.length; i++) {
+                const wallet = wallets[i];
+                const proxy = proxies[i % proxies.length] || null;
+                const { address, privateKey } = wallet;
+                
+                try {
+                    logger.verbose(`Processing wallet ${i + 1}/${wallets.length}`, address);
+                    const socket = new LayerEdgeConnection(proxy, privateKey);
+                    
+                    logger.progress(address, 'Wallet Processing Started', 'start');
+                    logger.info(`Wallet Details`, `Address: ${address}, Proxy: ${proxy || 'No Proxy'}`);
+
+                    logger.progress(address, 'Performing Daily Check-in', 'processing');
+                    await socket.dailyCheckIn();
+
+                    logger.progress(address, 'Checking Node Status', 'processing');
+                    const isRunning = await socket.checkNodeStatus();
+
+                    if (isRunning) {
+                        logger.progress(address, 'Claiming Node Points', 'processing');
+                        await socket.stopNode();
+                    }
+
+                    logger.progress(address, 'Reconnecting Node', 'processing');
+                    await socket.connectNode();
+
+                    logger.progress(address, 'Checking Node Points', 'processing');
+                    await socket.checkNodePoints();
+
+                    logger.progress(address, 'Wallet Processing Complete', 'success');
+                } catch (error) {
+                    logger.error(`Failed processing wallet ${address}`, '', error);
+                    logger.progress(address, 'Wallet Processing Failed', 'failed');
+                    await delay(5); // Wait 5 seconds before moving to next wallet
+                }
+            }
+            
+            logger.warn('Cycle Complete', 'Waiting 1 hour before next run...');
+            await delay(60 * 60);
+        }
+    } catch (error) {
+        logger.error('Fatal error occurred', '', error);
+        process.exit(1);
+    }
+}
+
+run();
